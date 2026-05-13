@@ -20,10 +20,7 @@ class KnowledgeController extends Controller
                 ->toArray();
             if (!$knowledge) abort(500, __('Article does not exist'));
             $user = User::find($request->user['id']);
-            $userService = new UserService();
-            if (!$userService->isAvailable($user)) {
-                $this->formatAccessData($knowledge['body']);
-            }
+            $this->formatAccessData($knowledge['body'], $user);
             $subscribeUrl = Helper::getSubscribeUrl($user['token']);
             $knowledge['body'] = str_replace('{{siteName}}', config('v2board.app_name', 'V2Board'), $knowledge['body']);
             $knowledge['body'] = str_replace('{{subscribeUrl}}', $subscribeUrl, $knowledge['body']);
@@ -61,19 +58,42 @@ class KnowledgeController extends Controller
         ]);
     }
 
-    private function getBetween($input, $start, $end)
+    private function formatAccessData(&$body, User $user)
     {
-        $substr = substr($input, strlen($start) + strpos($input, $start), (strlen($input) - strpos($input, $end)) * (-1));
-        return $start . $substr . $end;
+        $userService = new UserService();
+        $body = preg_replace_callback('/<!--access start(?P<config>.*?)-->(?P<content>.*?)<!--access end-->/s', function ($matches) use ($user, $userService) {
+            $planIds = $this->getAccessPlanIds($matches['config'] ?? '');
+            $hasAccess = $userService->isAvailable($user);
+
+            if ($hasAccess && $planIds) {
+                $hasAccess = in_array((int)$user->plan_id, $planIds, true);
+            }
+
+            if ($hasAccess) {
+                return $matches['content'];
+            }
+
+            return '<div class="v2board-no-access">'. __('You must have a valid subscription to view content in this area') .'</div>';
+        }, $body);
     }
 
-    private function formatAccessData(&$body)
+    private function getAccessPlanIds(string $config): array
     {
-        while (strpos($body, '<!--access start-->') !== false) {
-            $accessData = $this->getBetween($body, '<!--access start-->', '<!--access end-->');
-            if ($accessData) {
-                $body = str_replace($accessData, '<div class="v2board-no-access">'. __('You must have a valid subscription to view content in this area') .'</div>', $body);
-            }
+        $config = trim($config);
+        if ($config === '') {
+            return [];
         }
+
+        if (strpos($config, ':') === 0) {
+            $config = substr($config, 1);
+        } elseif (preg_match('/plan_ids?\s*=\s*([0-9,\s]+)/i', $config, $matches)) {
+            $config = $matches[1];
+        }
+
+        $planIds = array_filter(array_map('trim', explode(',', $config)), function ($value) {
+            return $value !== '' && is_numeric($value);
+        });
+
+        return array_values(array_unique(array_map('intval', $planIds)));
     }
 }
