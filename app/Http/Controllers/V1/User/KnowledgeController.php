@@ -16,9 +16,9 @@ class KnowledgeController extends Controller
         if ($request->input('id')) {
             $knowledge = Knowledge::where('id', $request->input('id'))
                 ->where('show', 1)
-                ->first()
-                ->toArray();
+                ->first();
             if (!$knowledge) abort(500, __('Article does not exist'));
+            $knowledge = $knowledge->toArray();
             $user = User::find($request->user['id']);
             $this->formatAccessData($knowledge['body'], $user);
             $subscribeUrl = Helper::getSubscribeUrl($user['token']);
@@ -61,15 +61,13 @@ class KnowledgeController extends Controller
     private function formatAccessData(&$body, User $user)
     {
         $userService = new UserService();
-        $body = preg_replace_callback('/<!--access start(?P<config>.*?)-->(?P<content>.*?)<!--access end-->/s', function ($matches) use ($user, $userService) {
-            $planIds = $this->getAccessPlanIds($matches['config'] ?? '');
-            $hasAccess = $userService->isAvailable($user);
+        $body = preg_replace_callback('/<!--access start(?P<config>[^>]*)-->(?P<content>.*?)<!--access end-->/s', function ($matches) use ($user, $userService) {
+            $accessConfig = $this->parseAccessConfig($matches['config'] ?? '');
 
-            if ($hasAccess && $planIds) {
-                $hasAccess = in_array((int)$user->plan_id, $planIds, true);
-            }
-
-            if ($hasAccess) {
+            if (
+                $userService->isAvailable($user) &&
+                $this->userCanAccessPlans($user, $accessConfig)
+            ) {
                 return $matches['content'];
             }
 
@@ -77,23 +75,52 @@ class KnowledgeController extends Controller
         }, $body);
     }
 
-    private function getAccessPlanIds(string $config): array
+    private function parseAccessConfig(string $config): array
     {
         $config = trim($config);
         if ($config === '') {
-            return [];
+            return [
+                'hasPlanRestriction' => false,
+                'isValid' => true,
+                'planIds' => []
+            ];
         }
 
         if (strpos($config, ':') === 0) {
             $config = substr($config, 1);
-        } elseif (preg_match('/plan_ids?\s*=\s*([0-9,\s]+)/i', $config, $matches)) {
+        } elseif (preg_match('/^plan_ids?\s*=\s*([0-9,\s]+)$/i', $config, $matches)) {
             $config = $matches[1];
+        } else {
+            return [
+                'hasPlanRestriction' => true,
+                'isValid' => false,
+                'planIds' => []
+            ];
         }
 
         $planIds = array_filter(array_map('trim', explode(',', $config)), function ($value) {
             return $value !== '' && is_numeric($value);
         });
 
-        return array_values(array_unique(array_map('intval', $planIds)));
+        $planIds = array_values(array_unique(array_map('intval', $planIds)));
+
+        return [
+            'hasPlanRestriction' => true,
+            'isValid' => count($planIds) > 0,
+            'planIds' => $planIds
+        ];
+    }
+
+    private function userCanAccessPlans(User $user, array $accessConfig): bool
+    {
+        if (!$accessConfig['hasPlanRestriction']) {
+            return true;
+        }
+
+        if (!$accessConfig['isValid'] || $user->plan_id === null) {
+            return false;
+        }
+
+        return in_array((int)$user->plan_id, $accessConfig['planIds'], true);
     }
 }
